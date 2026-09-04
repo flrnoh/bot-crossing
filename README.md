@@ -74,7 +74,7 @@ than have you work around it.
 | How finished a building looks | How large its transcript is, on a log scale |
 | Scaffolding | Somebody is at that site right now |
 | Walking out of the ship | A thread that just appeared |
-| Walking back into the ship | You archived it |
+| Walking back into the ship | You archived it — or it went quiet long enough to archive itself |
 
 ### A zone stays where it is
 
@@ -215,6 +215,22 @@ callers cannot interleave a read-modify-write.
 
 Claude Code also rewrites its session records from memory and can stomp the flag, so the
 colony re-asserts it on every scan — an archive that gets stomped comes back within one poll.
+
+### Housekeeping
+
+A colony nobody tidies silts up: a fortnight of finished threads ends up standing between you
+and the one that actually wants something. So **quiet threads send themselves home**. After a
+thread has been silent for the window under Settings → Housekeeping (14 days out of the box),
+the next poll archives it.
+
+Only threads with nothing left to say. Anything still running, stuck on an error, or holding a
+question for you stays exactly where it is however old it gets — age is not the same as being
+finished, and that single `?` on the field is the whole reason to look at the colony in the
+morning. A merged thread that has since gone quiet is fair game; it already got its parade.
+
+Nothing is deleted. Archiving hides a thread and sets the same `isArchived` flag your own `A`
+would; the transcript never moves. Turn the whole thing off with one toggle if you would
+rather sweep by hand.
 
 Nothing is ever written to your Claude Code data except that one `isArchived` field. The
 folder buttons only ever hand a path to `open`.

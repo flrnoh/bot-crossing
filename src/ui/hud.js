@@ -229,6 +229,18 @@ export class Hud {
       this._toggle('Show FPS', 'showFps')
     )
     body.appendChild(view)
+
+    // Housekeeping.
+    const keep = group('Housekeeping')
+    keep.append(
+      this._toggle(
+        'Send quiet threads home',
+        'autoArchive',
+        'Archives threads that have gone silent. Anything working, stuck, or waiting on you stays put.'
+      ),
+      this._slider('After', 'autoArchiveDays', 3, 90, 1, (v) => `${v} days`)
+    )
+    body.appendChild(keep)
   }
 
   _row(label, hint) {

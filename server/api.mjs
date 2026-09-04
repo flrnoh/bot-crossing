@@ -103,20 +103,23 @@ async function writeState(next) {
 }
 
 /**
- * Add an id to the archive list, or take it back out. Returns the whole list so the caller
+ * Add ids to the archive list, or take them back out. Returns the whole list so the caller
  * can adopt it rather than guess at it — which is what keeps a second tab honest.
  */
-async function writeArchived(id, archived) {
+async function writeArchived(ids, archived) {
   return serialise(async () => {
     const current = await readState()
     const set = new Set(current.archived)
     const at = { ...current.archivedAt }
-    if (archived) {
-      set.add(id)
-      at[id] = Date.now()
-    } else {
-      set.delete(id)
-      delete at[id]
+    const now = Date.now()
+    for (const id of ids) {
+      if (archived) {
+        set.add(id)
+        at[id] = now
+      } else {
+        set.delete(id)
+        delete at[id]
+      }
     }
     return persist({ ...current, archived: [...set], archivedAt: at })
   })
@@ -351,25 +354,44 @@ export async function apiMiddleware(req, res, next) {
     }
 
     if (url.pathname === '/api/archive' && req.method === 'POST') {
-      const { id, harness, ref, archived } = await readJsonBody(req)
-      if (!id) return send(res, 400, { ok: false, error: 'Missing thread id' })
+      const body = await readJsonBody(req)
+      const archived = Boolean(body.archived)
+      // One thread, or a batch. The sweep sends a batch so a fortnight's worth of quiet
+      // threads is one write to the colony file rather than thirty.
+      const items = asArray(body.threads).length
+        ? asArray(body.threads)
+        : body.id
+          ? [{ id: body.id, harness: body.harness, ref: body.ref }]
+          : []
+      const ids = [...new Set(items.map((t) => t && t.id).filter(Boolean))]
+      if (!ids.length) return send(res, 400, { ok: false, error: 'Missing thread id' })
 
       // The colony's own list first: it decides what you see, and for a thread with no
       // harness session record it is the only place the archive exists at all.
-      const colony = await writeArchived(id, Boolean(archived))
-      const reply = { colony: { archived: colony.archived, archivedAt: colony.archivedAt } }
+      const colony = await writeArchived(ids, archived)
 
-      if (!ref || !harness) {
-        return send(res, 200, {
-          ...reply,
-          ok: true,
-          archived: Boolean(archived),
-          harnessRecord: false,
-          note: 'Archived in the colony. That harness has no session record for this thread.',
-        })
+      // Then each harness's session record, where there is one to keep in step.
+      let attempted = 0
+      let records = 0
+      for (const item of items) {
+        if (!item || !item.id || !item.ref || !item.harness) continue
+        attempted++
+        try {
+          const result = await setThreadArchived(item.harness, item.ref, archived)
+          if (result.ok) records++
+        } catch {
+          /* the colony still archived it; a harness that refused is reported below */
+        }
       }
-      const result = await setThreadArchived(harness, ref, archived)
-      return send(res, 200, { ...result, ...reply, ok: true, archived: Boolean(archived), harnessRecord: result.ok })
+
+      return send(res, 200, {
+        ok: true,
+        archived,
+        count: ids.length,
+        // False when nothing had a session record to update — the page says so in its toast.
+        harnessRecord: attempted === 0 ? false : records > 0,
+        colony: { archived: colony.archived, archivedAt: colony.archivedAt },
+      })
     }
 
     return send(res, 404, { error: 'Unknown endpoint' })

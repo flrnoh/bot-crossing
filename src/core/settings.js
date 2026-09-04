@@ -139,6 +139,12 @@ const DEFAULTS = {
   showFps: false,
   showLabels: true,
   reducedMotion: false,
+
+  // Housekeeping. On by default because the alternative is what actually happens: a colony
+  // nobody ever tidies, where a fortnight of finished threads stands between you and the
+  // one that wants something. Archiving hides a thread; it never deletes anything.
+  autoArchive: true,
+  autoArchiveDays: 14, // days of complete silence before a thread sends itself home
 }
 
 /** Keys whose change forces a full rebuild of the world (terrain, scatter, sky). */
