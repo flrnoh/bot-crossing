@@ -57,26 +57,93 @@ async function readState() {
 }
 
 /**
- * One writer: the browser owns this file and PUTs it whole. `/api/archive` deliberately
- * does not touch it — if it did, the next save from a page holding older state would
- * silently drop every archive made since that page loaded.
+ * Every write to the colony file goes through here, one at a time.
+ *
+ * Two callers reach for this file — a page PUTting its layout, and `/api/archive` — and it
+ * is rewritten whole, so an interleaved read-modify-write would drop whichever one lost.
+ * The chain is per-process, which is all that is needed: one server owns one file, and it
+ * is the only thing that writes it.
+ */
+let stateWrites = Promise.resolve()
+
+function serialise(fn) {
+  const run = stateWrites.then(fn, fn)
+  // Keep the chain alive even when a link rejects; the rejection still reaches its caller.
+  stateWrites = run.then(
+    () => {},
+    () => {}
+  )
+  return run
+}
+
+/**
+ * Who owns what in this file.
+ *
+ * The page owns the things it invents — where zones sit, which settings it is running, what
+ * you have opened — and PUTs them whole, because it is the only thing that knows them.
+ *
+ * The archive list is different: every open tab reads it, and a tab only learns it changed
+ * when it next reloads. A page that loaded an hour ago is holding a stale copy, so letting
+ * it PUT that copy back means its next layout save silently resurrects everything archived
+ * since — from another tab, or from this one before a reload. So the server owns the list
+ * outright: a PUT cannot touch `archived`/`archivedAt` at all, and `/api/archive` is the
+ * only way in.
  */
 async function writeState(next) {
-  const state = {
+  return serialise(async () => {
+    const current = await readState()
+    return persist({
+      ...current,
+      opened: asArray(next.opened),
+      plots: asObject(next.plots),
+      seen: asObject(next.seen),
+      settings: next.settings && typeof next.settings === 'object' ? next.settings : null,
+    })
+  })
+}
+
+/**
+ * Add ids to the archive list, or take them back out. Returns the whole list so the caller
+ * can adopt it rather than guess at it — which is what keeps a second tab honest.
+ */
+async function writeArchived(ids, archived) {
+  return serialise(async () => {
+    const current = await readState()
+    const set = new Set(current.archived)
+    const at = { ...current.archivedAt }
+    const now = Date.now()
+    for (const id of ids) {
+      if (archived) {
+        set.add(id)
+        at[id] = now
+      } else {
+        set.delete(id)
+        delete at[id]
+      }
+    }
+    return persist({ ...current, archived: [...set], archivedAt: at })
+  })
+}
+
+/** The actual write. Only ever called from inside `serialise`. */
+async function persist(state) {
+  const out = {
     version: STATE_VERSION,
-    archived: asArray(next.archived),
-    archivedAt: asObject(next.archivedAt),
-    opened: asArray(next.opened),
-    plots: asObject(next.plots),
-    seen: asObject(next.seen),
-    settings: next.settings && typeof next.settings === 'object' ? next.settings : null,
+    archived: asArray(state.archived),
+    archivedAt: asObject(state.archivedAt),
+    opened: asArray(state.opened),
+    plots: asObject(state.plots),
+    seen: asObject(state.seen),
+    settings: state.settings && typeof state.settings === 'object' ? state.settings : null,
     updatedAt: Date.now(),
   }
   await fsp.mkdir(DATA_DIR, { recursive: true })
-  const tmp = STATE_FILE + '.tmp'
-  await fsp.writeFile(tmp, JSON.stringify(state, null, 2))
+  // The temp file carries the pid so two servers pointed at one data dir cannot land on
+  // the same scratch path and rename each other's half-written file into place.
+  const tmp = `${STATE_FILE}.${process.pid}.tmp`
+  await fsp.writeFile(tmp, JSON.stringify(out, null, 2))
   await fsp.rename(tmp, STATE_FILE)
-  return state
+  return out
 }
 
 /**
@@ -287,20 +354,44 @@ export async function apiMiddleware(req, res, next) {
     }
 
     if (url.pathname === '/api/archive' && req.method === 'POST') {
-      const { id, harness, ref, archived } = await readJsonBody(req)
-      if (!id) return send(res, 400, { ok: false, error: 'Missing thread id' })
+      const body = await readJsonBody(req)
+      const archived = Boolean(body.archived)
+      // One thread, or a batch. The sweep sends a batch so a fortnight's worth of quiet
+      // threads is one write to the colony file rather than thirty.
+      const items = asArray(body.threads).length
+        ? asArray(body.threads)
+        : body.id
+          ? [{ id: body.id, harness: body.harness, ref: body.ref }]
+          : []
+      const ids = [...new Set(items.map((t) => t && t.id).filter(Boolean))]
+      if (!ids.length) return send(res, 400, { ok: false, error: 'Missing thread id' })
 
-      // Only the harness's own records are touched here — the page records the intent.
-      if (!ref || !harness) {
-        return send(res, 200, {
-          ok: true,
-          archived: Boolean(archived),
-          harnessRecord: false,
-          note: 'Archived in the colony. That harness has no session record for this thread.',
-        })
+      // The colony's own list first: it decides what you see, and for a thread with no
+      // harness session record it is the only place the archive exists at all.
+      const colony = await writeArchived(ids, archived)
+
+      // Then each harness's session record, where there is one to keep in step.
+      let attempted = 0
+      let records = 0
+      for (const item of items) {
+        if (!item || !item.id || !item.ref || !item.harness) continue
+        attempted++
+        try {
+          const result = await setThreadArchived(item.harness, item.ref, archived)
+          if (result.ok) records++
+        } catch {
+          /* the colony still archived it; a harness that refused is reported below */
+        }
       }
-      const result = await setThreadArchived(harness, ref, archived)
-      return send(res, 200, { ...result, ok: true, archived: Boolean(archived), harnessRecord: result.ok })
+
+      return send(res, 200, {
+        ok: true,
+        archived,
+        count: ids.length,
+        // False when nothing had a session record to update — the page says so in its toast.
+        harnessRecord: attempted === 0 ? false : records > 0,
+        colony: { archived: colony.archived, archivedAt: colony.archivedAt },
+      })
     }
 
     return send(res, 404, { error: 'Unknown endpoint' })
