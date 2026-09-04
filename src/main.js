@@ -15,6 +15,7 @@ import {
   saveState,
   openThread,
   archiveThread,
+  archiveThreads,
   newSession,
   revealFolder,
 } from './game/api.js'
@@ -586,6 +587,70 @@ function adoptArchived(res) {
   state.archivedAt = (res.colony && res.colony.archivedAt) || {}
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Threads quiet long enough to send themselves home.
+ *
+ * Only the ones with nothing left to say. Anything still running, stuck on an error, or
+ * holding a question for you stays exactly where it is however old it gets — age is not
+ * the same as being finished, and that single `?` standing on the field is the whole
+ * reason to look at the colony in the morning. A merged thread that has since gone quiet
+ * is fair game: it already got its parade.
+ */
+function quietEnoughToArchive(list, now) {
+  const cutoff = now - Math.max(1, settings.get('autoArchiveDays')) * DAY_MS
+  const archivedSet = new Set(state.archived)
+  return list.filter(
+    (t) =>
+      !t.archived &&
+      !archivedSet.has(t.id) &&
+      !t.running &&
+      !t.hasError &&
+      !t.unread &&
+      // A thread whose timestamp did not survive the scan is left alone. Treating a missing
+      // date as the epoch would read every one of them as ancient and sweep the lot.
+      t.lastActivityAt > 0 &&
+      t.lastActivityAt < cutoff
+  )
+}
+
+let sweeping = false
+let sweepTimer = 0
+
+/**
+ * Coalesce a flurry of setting changes into one sweep. The window slider fires on every
+ * step of a drag, and a drag from 90 down to 30 passes straight through 3 — without this,
+ * letting go at 30 would already have sent home everything quiet for three days.
+ */
+function scheduleSweep(delay = 700) {
+  clearTimeout(sweepTimer)
+  sweepTimer = setTimeout(() => sweep(threads), delay)
+}
+
+/**
+ * Housekeeping, run after every poll. Nothing is deleted — an archived thread is one
+ * `A` away from coming back, and its transcript never moves — so this is only ever about
+ * what is standing on the ground in front of you.
+ */
+async function sweep(list) {
+  if (sweeping || !settings.get('autoArchive')) return
+  const due = quietEnoughToArchive(list, Date.now())
+  if (!due.length) return
+  sweeping = true
+  try {
+    adoptArchived(await archiveThreads(due, true))
+    applyThreads(threads)
+    const days = settings.get('autoArchiveDays')
+    hud.toast(`${due.length} quiet ${due.length === 1 ? 'thread' : 'threads'} sent home — ${days} days idle`)
+    colony.ship.ping()
+  } catch {
+    /* the next poll tries again; a sweep that did not land costs nothing */
+  } finally {
+    sweeping = false
+  }
+}
+
 let polling = false
 async function poll() {
   if (polling) return
@@ -594,6 +659,7 @@ async function poll() {
     const res = await fetchThreads()
     applyThreads(res.threads || [])
     hud.removeBoot()
+    await sweep(res.threads || [])
   } catch (err) {
     hud.toast(err.message || 'Could not reach the thread scanner', 'err')
     hud.removeBoot()
@@ -670,6 +736,9 @@ settings.onChange((changed, scope) => {
   colony.onSettingsChanged(changed, scope)
   if (changed.has('showFps')) hud.syncSettings()
   if (changed.has('maxAgents')) applyThreads(threads)
+  // Turning housekeeping on, or shortening its window, should act on what is standing there
+  // now rather than wait out the poll — once the slider has settled.
+  if (changed.has('autoArchive') || changed.has('autoArchiveDays')) scheduleSweep()
 })
 
 // ── frame ─────────────────────────────────────────────────────────────────────────────
