@@ -23,9 +23,10 @@ import {
  * Boot and the outer game loop.
  *
  * The one interesting piece of orchestration here is the archive round trip. The harness
- * owns the session records; the colony owns nothing but its own list of what you archived,
- * and that list is written by exactly one writer — this page — so a save from a stale tab
- * can never silently drop an archive. Everything else is wiring.
+ * owns the session records; the server owns the colony's list of what you archived, and
+ * hands the whole list back on every change. This page never sends its own copy of it, so
+ * a tab that has been open since yesterday cannot resurrect what another one archived.
+ * Everything else is wiring.
  */
 
 const POLL_MS = 15000
@@ -199,9 +200,7 @@ const actions = {
     if (!thread) return
     try {
       const res = await archiveThread(thread, true)
-      state.archived = [...new Set([...state.archived, thread.id])]
-      state.archivedAt = { ...state.archivedAt, [thread.id]: Date.now() }
-      queueSave()
+      adoptArchived(res)
       select(null, {})
       applyThreads(threads)
       hud.toast(
@@ -571,6 +570,20 @@ function applyThreads(list) {
     state.plots = layout
     queueSave()
   }
+}
+
+/**
+ * Take the colony's archive list as the server just handed it back.
+ *
+ * Adopting it wholesale rather than patching our own copy is the whole point: it is the
+ * same list every other open tab now holds, including whatever they archived while this
+ * one was not looking.
+ */
+function adoptArchived(res) {
+  const list = res && res.colony && res.colony.archived
+  if (!Array.isArray(list)) return
+  state.archived = list
+  state.archivedAt = (res.colony && res.colony.archivedAt) || {}
 }
 
 let polling = false

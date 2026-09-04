@@ -204,12 +204,17 @@ thread it already has. `claude://resume` is the fallback for threads that only e
 transcript: it *imports* the transcript, which creates a second untitled session and rewrites
 the `.jsonl`, so it is only ever used when there is nothing to navigate to.
 
-Archiving carries a deliberate one-writer discipline: the browser owns
-`data/colony.json` and PUTs it whole, `/api/archive` only touches Claude Code's records. If
-both wrote it, a save from a page holding older state would silently drop every archive made
-since that page loaded. Claude Code also rewrites its session records from memory and can
-stomp the flag, so the colony re-asserts it on every scan — an archive that gets stomped comes
-back within one poll.
+Archiving carries a deliberate split of ownership. The browser owns what it invents — where
+zones sit, which settings it is running — and PUTs those whole. The **archive list is the
+server's**, because every open tab reads it and none of them learns it changed until it
+reloads: a page that loaded an hour ago holds a stale copy, and handing that copy back on its
+next layout save would silently resurrect everything archived since. So a PUT cannot touch
+`archived`/`archivedAt` at all, `/api/archive` is the only way in, and it returns the whole
+list for the page to adopt. Writes to the file are serialised through one chain, so the two
+callers cannot interleave a read-modify-write.
+
+Claude Code also rewrites its session records from memory and can stomp the flag, so the
+colony re-asserts it on every scan — an archive that gets stomped comes back within one poll.
 
 Nothing is ever written to your Claude Code data except that one `isArchived` field. The
 folder buttons only ever hand a path to `open`.
