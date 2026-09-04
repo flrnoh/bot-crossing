@@ -31,8 +31,18 @@ export const saveState = (state) =>
  */
 export const openThread = (thread) => post('/api/open', { harness: thread.harness, ref: thread.ref })
 
-export const archiveThread = (thread, archived) =>
-  post('/api/archive', { id: thread.id, harness: thread.harness, ref: thread.ref, archived })
+/**
+ * Archive one thread, or a whole batch of them, and get the colony's authoritative archive
+ * list back. The server owns that list — a page never sends its own copy — so the answer is
+ * what to adopt rather than something to reconcile against.
+ */
+export const archiveThreads = (list, archived) =>
+  post('/api/archive', {
+    threads: list.map((t) => ({ id: t.id, harness: t.harness, ref: t.ref })),
+    archived,
+  })
+
+export const archiveThread = (thread, archived) => archiveThreads([thread], archived)
 
 /** A brand new thread in a repo, via that harness's own new-session deep link. */
 export const newSession = (folder, harness) => post('/api/new-session', { folder, harness })
